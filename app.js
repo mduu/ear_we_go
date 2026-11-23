@@ -2,27 +2,30 @@
   'use strict';
 
   var MODULES = window.EWG_MODULES || [];
+  var AUDIO = window.EWG_AUDIO || {};
+  var split = window.EWG_split;
   var ALL = [];
   MODULES.forEach(function (m, mi) {
     m.sessions.forEach(function (s, si) { ALL.push({ s: s, m: m, mi: mi, si: si }); });
   });
 
   var $app = document.getElementById('app');
-  var synth = window.speechSynthesis || null;
   var STORE_KEY = 'earwego.v1';
-  var RATES = { slow: 0.75, normal: 0.95, fast: 1.1 };
+  var RATES = { slow: 0.8, normal: 1, fast: 1.15 };
+  var PAGE_SIZE = 5;
   var store = loadStore();
+  var pages = {}; // module id -> page shown on the home screen
   var activePlayer = null;
 
   /* ---------- storage ---------- */
   function loadStore() {
-    var base = { best: {}, rate: 'normal', accent: 'GB' };
+    var base = { best: {}, rate: 'normal', module: null };
     try {
       var saved = JSON.parse(localStorage.getItem(STORE_KEY));
       if (saved && typeof saved === 'object') {
         base.best = saved.best || {};
         if (RATES[saved.rate]) base.rate = saved.rate;
-        if (saved.accent === 'US' || saved.accent === 'GB') base.accent = saved.accent;
+        if (typeof saved.module === 'string') base.module = saved.module;
       }
     } catch (e) { /* private mode etc. */ }
     return base;
@@ -58,7 +61,8 @@
     pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="5" height="16" rx="1.5"/><rect x="14" y="4" width="5" height="16" rx="1.5"/></svg>',
     back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6.5v11a.8.8 0 0 1-1.25.66L2 12.66a.8.8 0 0 1 0-1.32l7.75-5.5A.8.8 0 0 1 11 6.5zm11 0v11a.8.8 0 0 1-1.25.66L13 12.66a.8.8 0 0 1 0-1.32l7.75-5.5A.8.8 0 0 1 22 6.5z"/></svg>',
     restart: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="3.5" height="14" rx="1.2"/><path d="M21 6.5v11a.8.8 0 0 1-1.25.66L9 12.66a.8.8 0 0 1 0-1.32l10.75-5.5A.8.8 0 0 1 21 6.5z"/></svg>',
-    arrow: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 8 12l6.5 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    left: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 8 12l6.5 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    right: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 5 16 12l-6.5 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
   };
 
   function starsEl(n, big) {
@@ -70,166 +74,198 @@
     var p = score / total;
     return p >= 0.85 ? 3 : p >= 0.65 ? 2 : p >= 0.45 ? 1 : 0;
   }
-
-  /* ---------- voices ---------- */
-  var voices = [];
-  function refreshVoices() {
-    if (!synth) return;
-    voices = synth.getVoices().filter(function (v) { return /^en([-_]|$)/i.test(v.lang); });
-  }
-  if (synth) {
-    refreshVoices();
-    synth.onvoiceschanged = refreshVoices;
+  function clock(sec) {
+    sec = Math.max(0, Math.round(sec));
+    return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
   }
 
-  var NOVELTY = /albert|bad news|bahh|bells|boing|bubbles|cellos|wobble|fred|good news|jester|junior|kathy|organ|superstar|ralph|trinoids|whisper|zarvox|deranged|hysterical/i;
-  var ELOQUENCE = /^(eddy|flo|grandma|grandpa|reed|rocko|sandy|shelley)\b/i;
-  var FEMALE = /female|google us english|samantha|kate|serena|karen|moira|tessa|martha|stephanie|sonia|libby|maisie|zira|jenny|aria|susan|hazel|fiona|ava|allison|victoria|catherine|emma|amy|michelle|nicky|tara|veena|flo|sandy|shelley|grandma|natasha|clara|heather|abbi|bella|hollie|olivia/i;
-  var MALE = /\b(male|daniel|oliver|arthur|ryan|george|alex|david|mark|tom|guy|aaron|gordon|rishi|thomas|brian|william|james|eddy|reed|rocko|grandpa|aman|christopher|eric|roger|steffan|noah|elliot|ethan|alfie)\b/i;
-  var MAIN_ACCENTS = ['en-gb', 'en-us', 'en-au', 'en-ie', 'en-nz', 'en-ca'];
-
-  function genderOf(v) { return FEMALE.test(v.name) ? 'f' : MALE.test(v.name) ? 'm' : null; }
-  function scoreVoice(v) {
-    var lang = v.lang.replace('_', '-').toLowerCase();
-    var pref = store.accent === 'US' ? 'en-us' : 'en-gb';
-    var s = lang === pref ? 60 : MAIN_ACCENTS.indexOf(lang) >= 0 ? 25 : 5;
-    if (/natural|premium|enhanced|neural|siri/i.test(v.name)) s += 30;
-    if (/google|online/i.test(v.name)) s += 10;
-    if (/^(samantha|daniel|karen|kate|serena)\b/i.test(v.name)) s += 5;
-    if (NOVELTY.test(v.name)) s -= 300;
-    if (ELOQUENCE.test(v.name)) s -= 45;
-    return s;
-  }
-  function pickVoice(gender) {
-    if (!voices.length) refreshVoices();
-    var ranked = voices.map(function (v) { return { v: v, s: scoreVoice(v), g: genderOf(v) }; })
-      .filter(function (x) { return x.s > -100; })
-      .sort(function (a, b) { return b.s - a.s; });
-    if (!ranked.length) return { voice: null, pitch: gender === 'm' ? 0.85 : 1.1 };
-    for (var i = 0; i < ranked.length; i++) {
-      if (ranked[i].g === gender && ranked[i].s >= 20) return { voice: ranked[i].v, pitch: 1 };
-    }
-    var best = ranked[0];
-    return { voice: best.v, pitch: best.g === gender ? 1 : gender === 'm' ? 0.8 : 1.25 };
+  /* ---------- player (plays the recorded MP3 of a session) ---------- */
+  function loadInto(el, url) {
+    // Loading the file as a blob makes jumping around work on every web server.
+    // Opened straight from disk (file://) fetch is not allowed, so fall back to the plain URL.
+    var set = function (src) { el.src = src; el.load(); };
+    if (!window.fetch || location.protocol === 'file:') { set(url); return; }
+    fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('missing');
+      return r.blob();
+    }).then(function (b) {
+      el._blobUrl = URL.createObjectURL(b);
+      set(el._blobUrl);
+    }).catch(function () { set(url); });
   }
 
-  function makeUtterance(text, gender) {
-    var vc = pickVoice(gender);
-    var u = new SpeechSynthesisUtterance(text);
-    if (vc.voice) { u.voice = vc.voice; u.lang = vc.voice.lang; }
-    else u.lang = store.accent === 'US' ? 'en-US' : 'en-GB';
-    u.rate = RATES[store.rate];
-    u.pitch = vc.pitch;
-    return u;
-  }
-
-  function splitSentences(text) {
-    return text.replace(/([.!?]["”']?)\s+/g, '$1\n').split('\n').filter(Boolean);
-  }
-
-  /* ---------- player (reads sentence by sentence) ---------- */
   function createPlayer(session, onUpdate) {
     var parts = [];
     session.lines.forEach(function (ln, li) {
-      splitSentences(ln.t).forEach(function (t) { parts.push({ s: ln.s, t: t, li: li }); });
+      split(ln.t).forEach(function (t) { parts.push({ s: ln.s, t: t, li: li }); });
     });
-    var st = { idx: 0, playing: false, listens: 0, token: 0, timer: null, cur: null };
+    var meta = AUDIO[session.id];
+    var ok = !!meta && meta.t.length === parts.length + 1;
+    var total = ok ? meta.t[meta.t.length - 1] : 0;
+    var st = { error: !ok, listens: 0 };
+    var audio = new Audio();
+    var words = new Audio();
+    var raf = null, wordTimer = null;
 
-    function speak() {
-      if (st.idx >= parts.length) {
-        st.playing = false; st.idx = 0; st.listens++;
-        onUpdate();
-        return;
-      }
-      var p = parts[st.idx];
-      var u = makeUtterance(p.t, session.speakers[p.s].g);
-      var my = ++st.token;
-      var next = function () {
-        if (my !== st.token) return;
-        st.idx++;
-        onUpdate();
-        var gap = st.idx < parts.length && parts[st.idx].s !== p.s ? 380 : 140;
-        st.timer = setTimeout(function () { if (my === st.token && st.playing) speak(); }, gap);
-      };
-      u.onend = next;
-      u.onerror = function (e) {
-        if (e && (e.error === 'interrupted' || e.error === 'canceled')) return;
-        next();
-      };
-      st.cur = u; // keep a reference, otherwise some browsers drop the events
-      synth.speak(u);
+    audio.preload = 'auto';
+    words.preload = 'auto';
+    function applyRate() { audio.defaultPlaybackRate = audio.playbackRate = RATES[store.rate]; }
+    function playing() { return !audio.paused && !audio.ended; }
+    function loop() {
       onUpdate();
+      raf = playing() ? requestAnimationFrame(loop) : null;
     }
-    function halt() {
-      st.token++;
-      clearTimeout(st.timer);
-      if (synth && (synth.speaking || synth.pending)) synth.cancel();
+    ['play', 'pause', 'seeked', 'loadedmetadata'].forEach(function (ev) {
+      audio.addEventListener(ev, function () { if (!raf) loop(); });
+    });
+    audio.addEventListener('ended', function () {
+      st.listens++;
+      audio.currentTime = 0;
+      onUpdate();
+    });
+    audio.addEventListener('error', function () { st.error = true; onUpdate(); });
+
+    if (ok) {
+      loadInto(audio, 'audio/' + session.id + '.mp3');
+      loadInto(words, 'audio/' + session.id + '.vocab.mp3');
+      applyRate();
     }
+
+    function index() {
+      if (!ok) return 0;
+      var t = audio.currentTime + 0.03, i = 0;
+      while (i < parts.length - 1 && meta.t[i + 1] <= t) i++;
+      return i;
+    }
+    function stopWord() { clearInterval(wordTimer); words.pause(); }
+
     return {
       parts: parts,
       state: st,
-      play: function () { if (!synth || st.playing) return; halt(); st.playing = true; speak(); },
-      pause: function () { halt(); st.playing = false; onUpdate(); },
-      toggle: function () { if (st.playing) this.pause(); else this.play(); },
-      jump: function (i, forcePlay) {
-        var was = st.playing || forcePlay;
-        halt();
-        st.idx = Math.max(0, Math.min(parts.length - 1, i));
-        st.playing = !!was && !!synth;
-        if (st.playing) speak(); else onUpdate();
+      total: total,
+      playing: playing,
+      index: index,
+      time: function () { return audio.currentTime || 0; },
+      play: function () {
+        if (st.error) return;
+        stopWord();
+        applyRate();
+        var p = audio.play();
+        if (p && p.catch) p.catch(function () { /* interrupted */ });
       },
-      sayOnce: function (text) {
-        if (!synth) return;
-        this.pause();
-        st.cur = makeUtterance(text, 'f');
-        synth.speak(st.cur);
+      pause: function () { audio.pause(); },
+      toggle: function () { if (playing()) this.pause(); else this.play(); },
+      jump: function (i, thenPlay) {
+        if (st.error) return;
+        audio.currentTime = meta.t[Math.max(0, Math.min(parts.length - 1, i))];
+        if (thenPlay) this.play(); else onUpdate();
+      },
+      seek: function (frac) {
+        // Tapping the waveform jumps to the start of the sentence at that point.
+        if (st.error) return;
+        var t = Math.max(0, Math.min(1, frac)) * total, i = 0;
+        while (i < parts.length - 1 && meta.t[i + 1] <= t) i++;
+        this.jump(i);
+      },
+      back: function () {
+        // Like a music player: first press goes to the start of this sentence, a quick second press to the one before.
+        var i = index();
+        if (audio.currentTime - meta.t[i] < 1 && i > 0) i--;
+        this.jump(i);
+      },
+      setRate: applyRate,
+      sayWord: function (i) {
+        if (st.error || !meta.v || meta.v.length <= i + 1) return;
+        audio.pause();
+        stopWord();
+        var end = meta.v[i + 1] - 0.25;
+        words.currentTime = meta.v[i];
+        var p = words.play();
+        if (p && p.catch) p.catch(function () {});
+        wordTimer = setInterval(function () { if (words.currentTime >= end || words.ended) stopWord(); }, 40);
+      },
+      destroy: function () {
+        audio.pause(); stopWord();
+        if (raf) cancelAnimationFrame(raf);
+        [audio, words].forEach(function (el) {
+          if (el._blobUrl) URL.revokeObjectURL(el._blobUrl);
+          el.removeAttribute('src');
+        });
       }
     };
   }
 
   /* ---------- home ---------- */
+  var STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l2.9 6.2 6.6.8-4.9 4.6 1.3 6.6L12 17.4l-5.9 3.3 1.3-6.6L2.5 9.5l6.6-.8z"/></svg>';
+
+  function currentModule() {
+    var m = MODULES.filter(function (x) { return x.id === store.module; })[0];
+    if (m) return m;
+    // First visit: the first module that still has an open session.
+    return MODULES.filter(function (x) { return x.sessions.some(function (s) { return !store.best[s.id]; }); })[0] || MODULES[0];
+  }
+  function nextUp(m) {
+    return m.sessions.filter(function (s) { return !store.best[s.id]; })[0] || null;
+  }
+
   function renderHome() {
     document.title = 'Ear We Go!';
+    var m = currentModule(), mi = MODULES.indexOf(m);
     var got = ALL.reduce(function (a, x) { return a + ((store.best[x.s.id] || {}).stars || 0); }, 0);
-    var wave = h('div', { class: 'wave', 'aria-hidden': 'true' });
-    for (var i = 0; i < 34; i++) {
-      var ht = 18 + Math.round(Math.abs(Math.sin(i * 0.9) * 46 + Math.sin(i * 2.3) * 28));
-      wave.appendChild(h('i', { style: 'height:' + ht + '%;animation-delay:' + (i * 22) + 'ms' }));
-    }
-    var hero = h('header', { class: 'hero' },
-      h('div', { class: 'hero-in' },
-        h('h1', null, 'Ear We Go!'),
-        h('p', { class: 'hero-sub' }, 'Headphones in. Press play, listen closely, then answer the questions.'),
-        h('p', { class: 'hero-stars' }, starsEl(got ? 3 : 0), ' ' + got + ' of ' + (ALL.length * 3) + ' stars collected')),
-      wave);
+    var done = m.sessions.filter(function (s) { return store.best[s.id]; }).length;
+    var next = nextUp(m);
+    var target = next || m.sessions[0];
+    var pageCount = Math.ceil(m.sessions.length / PAGE_SIZE);
+    if (pages[m.id] == null) pages[m.id] = Math.floor((next ? m.sessions.indexOf(next) : 0) / PAGE_SIZE);
 
-    var grid = h('div', { class: 'modules' });
-    MODULES.forEach(function (m, mi) {
-      var done = m.sessions.filter(function (s) { return store.best[s.id]; }).length;
-      var list = h('ol', { class: 'tracks' });
-      m.sessions.forEach(function (s, si) {
-        var best = store.best[s.id];
+    var list = h('ol', { class: 'tracks' });
+    var pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
+    function show(page) {
+      page = Math.max(0, Math.min(pageCount - 1, page));
+      pages[m.id] = page;
+      list.replaceChildren();
+      m.sessions.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).forEach(function (s, k) {
+        var best = store.best[s.id], isNext = s === next;
+        var len = AUDIO[s.id] ? ', ' + clock(AUDIO[s.id].t[AUDIO[s.id].t.length - 1]) : '';
         list.appendChild(h('li', null,
-          h('a', { class: 'track', href: '#/track/' + s.id },
-            h('span', { class: 'track-no' }, String(si + 1)),
+          h('a', { class: 'track' + (isNext ? ' is-next' : ''), href: '#/track/' + s.id },
+            h('span', { class: 'tile' + (best ? (best.stars === 3 ? ' tile-top' : ' tile-done') : '') }, String(page * PAGE_SIZE + k + 1)),
             h('span', { class: 'track-main' },
               h('span', { class: 'track-title' }, s.title),
-              h('span', { class: 'track-kind' }, s.kind + (best ? ', best ' + best.score + ' of ' + best.total : ''))),
-            best ? starsEl(best.stars) : h('span', { class: 'track-new' }, 'New'))));
+              h('span', { class: 'track-kind' }, s.kind + len)),
+            best ? h('span', { class: 'track-score' + (best.stars === 3 ? ' top' : '') }, best.score + ' / ' + best.total)
+                 : isNext ? h('span', { class: 'track-next' }, 'Next up') : null)));
       });
-      grid.appendChild(h('section', { class: 'module m' + (mi + 1) },
-        h('div', { class: 'module-head' },
-          h('p', { class: 'module-no' }, 'Module ' + (mi + 1) + ', level ' + m.level),
-          h('h2', null, m.name),
-          h('p', { class: 'module-blurb' }, m.blurb),
-          h('div', { class: 'module-progress', role: 'img', 'aria-label': done + ' of ' + m.sessions.length + ' sessions done' },
-            m.sessions.map(function (s) { return h('i', { class: store.best[s.id] ? 'on' : '' }); }),
-            h('span', null, done + ' of ' + m.sessions.length + ' done'))),
-        list));
-    });
+      pager.replaceChildren();
+      for (var p = 0; p < pageCount; p++) {
+        (function (p) {
+          pager.appendChild(h('button', { type: 'button', class: 'pg', 'aria-current': p === page ? 'page' : null,
+            'aria-label': 'Page ' + (p + 1), onclick: function () { show(p); } }, String(p + 1)));
+        })(p);
+      }
+    }
+    show(pages[m.id]);
 
-    $app.replaceChildren(hero, grid,
-      h('footer', { class: 'foot' }, 'Your stars are saved on this device only.'));
+    $app.replaceChildren(
+      h('div', { class: 'home m' + (mi + 1) },
+        h('header', { class: 'mhead' },
+          h('div', { class: 'mhead-top' },
+            h('span', { class: 'brand' }, 'Ear We Go!'),
+            h('span', { class: 'starpill', role: 'img', 'aria-label': got + ' of ' + (ALL.length * 3) + ' stars collected' },
+              h('span', { html: STAR }), got + ' of ' + (ALL.length * 3))),
+          h('div', { class: 'mhead-main' },
+            h('div', null,
+              h('p', { class: 'mhead-level' }, 'Level ' + m.level),
+              h('h1', null, m.name),
+              h('p', { class: 'mhead-done' }, done + ' of ' + m.sessions.length + ' sessions done')),
+            h('a', { class: 'bigplay', href: '#/track/' + target.id, 'aria-label': (next ? 'Continue with ' : 'Play ') + target.title, html: ICON.play })),
+          h('div', { class: 'pills', role: 'group', 'aria-label': 'Module' }, MODULES.map(function (x) {
+            return h('button', { type: 'button', class: 'pill', 'aria-pressed': String(x === m),
+              onclick: function () { store.module = x.id; saveStore(); renderHome(); } }, x.name);
+          }))),
+        list,
+        pageCount > 1 ? pager : null,
+        h('footer', { class: 'foot' }, 'Your stars are saved on this device only.')));
   }
 
   /* ---------- session ---------- */
@@ -244,74 +280,84 @@
   function norm(s) {
     return String(s).toLowerCase().trim().replace(/^[£$]/, '').replace(/[.,!?]+$/, '').replace(/\s+/g, ' ');
   }
-  function seg(label, options, current, onChange) {
-    var wrap = h('div', { class: 'seg', role: 'group', 'aria-label': label });
-    options.forEach(function (o) {
-      var b = h('button', {
-        type: 'button', 'aria-pressed': String(o[0] === current),
-        onclick: function () {
-          Array.prototype.forEach.call(wrap.children, function (c) { c.setAttribute('aria-pressed', 'false'); });
-          b.setAttribute('aria-pressed', 'true');
-          onChange(o[0]);
-        }
-      }, o[1]);
-      wrap.appendChild(b);
-    });
-    return wrap;
-  }
-
   function renderSession(entry) {
     var s = entry.s, m = entry.m;
     document.title = s.title + ' – Ear We Go!';
+    pages[m.id] = Math.floor(entry.si / PAGE_SIZE);
+    store.module = m.id;
     var n = s.questions.length;
     var answers = new Array(n).fill(null);
     var checked = false;
     var multi = Object.keys(s.speakers).length > 1;
 
     /* player UI */
+    var BARS = 48;
+    var seed = 0;
+    for (var c = 0; c < s.id.length; c++) seed = (seed * 31 + s.id.charCodeAt(c)) % 9973;
+    var barEls = [];
+    var wave = h('div', { class: 'wave', 'aria-hidden': 'true', onclick: function (ev) {
+      var r = wave.getBoundingClientRect();
+      player.seek((ev.clientX - r.left) / r.width);
+    } });
+    for (var b = 0; b < BARS; b++) {
+      var ht = 16 + Math.round(Math.abs(Math.sin((b + seed) * 0.83) * 52 + Math.sin((b + seed) * 2.1) * 30));
+      barEls.push(wave.appendChild(h('i', { style: 'height:' + Math.min(100, ht) + '%' })));
+    }
     var playBtn = h('button', { type: 'button', class: 'play', onclick: function () { player.toggle(); } });
-    var eq = h('div', { class: 'eq', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i'), h('i'));
-    var fill = h('i');
-    var status = h('span', { class: 'player-status' });
+    var timeNow = h('span'), timeAll = h('span');
+    var backBtn = h('button', { type: 'button', class: 'ctl', 'aria-label': 'Back one sentence', title: 'Back one sentence', html: ICON.back,
+      onclick: function () { player.back(); } });
+    var restartBtn = h('button', { type: 'button', class: 'ctl', 'aria-label': 'Start again', title: 'Start again', html: ICON.restart,
+      onclick: function () { player.jump(0); } });
+    var SPEEDS = ['slow', 'normal', 'fast'], SPEED_LABEL = { slow: '0.8×', normal: '1.0×', fast: '1.15×' };
+    var speedBtn = h('button', { type: 'button', class: 'speed', title: 'Change the speed',
+      onclick: function () {
+        store.rate = SPEEDS[(SPEEDS.indexOf(store.rate) + 1) % SPEEDS.length];
+        saveStore(); player.setRate(); showSpeed();
+      } });
+    function showSpeed() {
+      speedBtn.textContent = SPEED_LABEL[store.rate];
+      speedBtn.setAttribute('aria-label', 'Speed ' + SPEED_LABEL[store.rate] + ', tap to change');
+    }
+    showSpeed();
     var playerEl = h('div', { class: 'player' },
-      playBtn,
-      h('div', { class: 'player-mid' },
-        h('div', { class: 'player-top' }, eq, status),
-        h('div', { class: 'bar' }, fill)),
-      h('button', { type: 'button', class: 'ctl', 'aria-label': 'Back one sentence', title: 'Back one sentence', html: ICON.back,
-        onclick: function () { player.jump(player.state.idx - 1); } }),
-      h('button', { type: 'button', class: 'ctl', 'aria-label': 'Start again', title: 'Start again', html: ICON.restart,
-        onclick: function () { player.jump(0); } }));
+      wave,
+      h('div', { class: 'player-time' }, timeNow, timeAll),
+      h('div', { class: 'player-ctl' },
+        speedBtn,
+        h('div', { class: 'player-main' }, backBtn, playBtn, restartBtn),
+        h('span', { class: 'speed-balance' })));
+    var warn = h('p', { class: 'warn', hidden: true },
+      'The audio for this session is missing. Ask whoever set up the app to run tools/generate-audio.mjs.');
 
-    var transcript = null; // built after checking
     var sentenceEls = [];
+    var lastIcon = null, lastBars = -1;
+    var segs = s.questions.map(function () { return h('i'); });
 
     function update() {
-      var st = player.state;
-      playBtn.innerHTML = st.playing ? ICON.pause : ICON.play;
-      playBtn.setAttribute('aria-label', st.playing ? 'Pause' : 'Play');
-      playerEl.classList.toggle('is-playing', st.playing);
-      fill.style.width = (st.idx / player.parts.length * 100) + '%';
-      status.textContent = st.playing ? 'Listening…'
-        : st.idx > 0 ? 'Paused'
-        : st.listens ? 'Listened ' + st.listens + (st.listens === 1 ? ' time' : ' times')
-        : 'Press play to start';
-      sentenceEls.forEach(function (el, i) { el.classList.toggle('now', st.playing && i === st.idx); });
+      var st = player.state, on = player.playing(), t = player.time();
+      if (lastIcon !== on) { playBtn.innerHTML = on ? ICON.pause : ICON.play; lastIcon = on; }
+      playBtn.setAttribute('aria-label', on ? 'Pause' : 'Play');
+      playBtn.disabled = backBtn.disabled = restartBtn.disabled = st.error;
+      warn.hidden = !st.error;
+      var played = player.total ? Math.round(Math.min(1, t / player.total) * BARS) : 0;
+      if (played !== lastBars) {
+        barEls.forEach(function (el, i) { el.className = i < played ? 'on' : ''; });
+        lastBars = played;
+      }
+      timeNow.textContent = st.error ? 'No audio' : clock(t);
+      timeAll.textContent = st.error ? '' : clock(player.total);
+      if (sentenceEls.length) {
+        var idx = player.index(), active = on || t > 0.05;
+        sentenceEls.forEach(function (el, i) { el.classList.toggle('now', active && i === idx); });
+      }
     }
     var player = createPlayer(s, update);
     activePlayer = player;
 
-    var settings = h('div', { class: 'settings' },
-      h('div', { class: 'setting' }, h('span', null, 'Speed'),
-        seg('Speed', [['slow', 'Slow'], ['normal', 'Normal'], ['fast', 'Fast']], store.rate,
-          function (v) { store.rate = v; saveStore(); })),
-      h('div', { class: 'setting' }, h('span', null, 'Voice'),
-        seg('Voice', [['GB', 'British'], ['US', 'American']], store.accent,
-          function (v) { store.accent = v; saveStore(); })));
-
     /* key words */
-    var vocab = h('ul', { class: 'vocab' }, s.vocab.map(function (v) {
-      return h('li', null, h('button', { type: 'button', title: 'Tap to hear it', onclick: function () { player.sayOnce(v[0]); } },
+    var vocab = h('ul', { class: 'vocab' }, s.vocab.map(function (v, i) {
+      return h('li', null, h('button', { type: 'button', title: 'Tap to hear it', onclick: function () { player.sayWord(i); } },
         h('b', null, v[0]), h('span', { lang: 'de' }, v[1])));
     }));
 
@@ -320,7 +366,10 @@
     var qList = h('ol', { class: 'questions' });
     s.questions.forEach(function (q, qi) {
       var body;
-      var setAnswer = function (val) { answers[qi] = val; li.classList.remove('needs'); note.textContent = ''; };
+      var setAnswer = function (val) {
+        answers[qi] = val; li.classList.remove('needs'); note.textContent = '';
+        segs[qi].className = val === null ? '' : 'on';
+      };
       if (q.t === 'mc' || q.t === 'tf') {
         var opts = q.t === 'mc' ? shuffle(q.o).map(function (o) { return [o, o]; }) : [[true, 'True'], [false, 'False']];
         body = h('div', { class: 'opts' + (q.t === 'tf' ? ' opts-tf' : '') });
@@ -383,6 +432,7 @@
         var ok = isRight(e.q, answers[i]);
         if (ok) score++;
         e.li.classList.add(ok ? 'right' : 'wrong');
+        segs[i].className = ok ? 'right' : 'wrong';
         Array.prototype.forEach.call(e.body.querySelectorAll('button, input'), function (c) {
           c.disabled = true;
           if (c._val !== undefined) {
@@ -402,20 +452,19 @@
 
       var msg = stars === 3 ? 'Perfect ears!' : stars === 2 ? 'Sharp listening.' :
         stars === 1 ? 'Not bad. One more listen and you\'ve got it.' : 'Tricky one. Read the text below, then try again.';
-      var idx = ALL.indexOf(entry);
-      var next = ALL[idx + 1];
+      var next = ALL[ALL.indexOf(entry) + 1];
       resultBox.hidden = false;
       resultBox.replaceChildren(
         starsEl(stars, true),
         h('p', { class: 'result-score' }, score + ' of ' + n + ' right'),
         h('p', { class: 'result-msg' }, msg),
         h('div', { class: 'result-actions' },
-          h('button', { type: 'button', class: 'btn', onclick: function () { route(true); } }, 'Try again'),
+          h('button', { type: 'button', class: 'btn', onclick: function () { route(); } }, 'Try again'),
           next ? h('a', { class: 'btn btn-main', href: '#/track/' + next.s.id }, 'Next: ' + next.s.title)
                : h('a', { class: 'btn btn-main', href: '#/' }, 'Back to all sessions')));
 
-      /* transcript with tap-to-hear sentences */
-      transcript = h('div', { class: 'transcript' });
+      /* the text, with tap-to-hear sentences */
+      var transcript = h('div', { class: 'transcript' });
       var pi = 0;
       s.lines.forEach(function (ln, li) {
         var p = h('p', null, multi ? h('b', null, s.speakers[ln.s].name + ': ') : null);
@@ -446,21 +495,19 @@
 
     $app.replaceChildren(
       h('div', { class: 'session m' + (entry.mi + 1) },
-        h('nav', { class: 'topbar' },
-          h('a', { class: 'backlink', href: '#/' }, h('span', { html: ICON.arrow }), 'All sessions')),
-        h('header', { class: 'session-head' },
-          h('p', { class: 'chip' }, m.name + ', session ' + (entry.si + 1) + ' of ' + m.sessions.length),
+        h('header', { class: 'shead' },
+          h('nav', { class: 'shead-top' },
+            h('a', { class: 'backlink', href: '#/', 'aria-label': 'All sessions', html: ICON.left }),
+            h('span', null, m.name + ', session ' + (entry.si + 1) + ' of ' + m.sessions.length)),
           h('h1', null, s.title),
-          h('p', { class: 'intro' }, s.kind + '. ' + s.intro)),
+          h('p', { class: 'intro' }, s.intro)),
+        playerEl,
+        warn,
         h('section', { class: 'block' },
           h('h2', null, 'Key words'),
-          h('p', { class: 'hint' }, 'Tap a word to hear it.'),
           vocab),
-        !synth ? h('p', { class: 'warn' }, 'This browser cannot read aloud. Open the page in Chrome, Safari or Edge.') : null,
-        playerEl,
-        settings,
         h('section', { class: 'block' },
-          h('h2', null, 'Questions'),
+          h('div', { class: 'block-head' }, h('h2', null, 'Questions'), h('div', { class: 'segs', 'aria-hidden': 'true' }, segs)),
           h('p', { class: 'hint' }, 'Read the questions first. Then listen, as often as you need.'),
           resultBox,
           qList,
@@ -471,15 +518,13 @@
   }
 
   /* ---------- router ---------- */
-  function route(keepScroll) {
-    if (activePlayer) { activePlayer.pause(); activePlayer = null; }
-    if (synth) synth.cancel();
+  function route() {
+    if (activePlayer) { activePlayer.destroy(); activePlayer = null; }
     var mt = location.hash.match(/^#\/track\/([\w-]+)/);
     var entry = mt && ALL.filter(function (x) { return x.s.id === mt[1]; })[0];
     if (entry) renderSession(entry); else renderHome();
-    if (keepScroll !== 'stay') window.scrollTo(0, 0);
+    window.scrollTo(0, 0);
   }
-  window.addEventListener('hashchange', function () { route(); });
-  window.addEventListener('pagehide', function () { if (synth) synth.cancel(); });
+  window.addEventListener('hashchange', route);
   route();
 })();

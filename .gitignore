@@ -1,3 +1,4 @@
 .env
 .audio-cache/
 .DS_Store
+dist/

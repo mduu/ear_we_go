@@ -126,8 +126,9 @@
     audio.addEventListener('error', function () { st.error = true; onUpdate(); });
 
     if (ok) {
-      loadInto(audio, 'audio/' + session.id + '.mp3');
-      loadInto(words, 'audio/' + session.id + '.vocab.mp3');
+      // The version in the URL changes whenever the audio is re-generated (see tools/generate-audio.mjs).
+      loadInto(audio, 'audio/' + session.id + '.mp3' + (meta.h ? '?v=' + meta.h : ''));
+      loadInto(words, 'audio/' + session.id + '.vocab.mp3' + (meta.hv ? '?v=' + meta.hv : ''));
       applyRate();
     }
 

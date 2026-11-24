@@ -240,7 +240,10 @@ async function main() {
       const vocab = await build(s.vocab.map((v) => ({ text: v[0], voice: VOCAB_VOICE, rate: '-10%', tail: PAUSE.vocab })));
       fs.writeFileSync(path.join(OUT, `${s.id}.mp3`), text.buffer);
       fs.writeFileSync(path.join(OUT, `${s.id}.vocab.mp3`), vocab.buffer);
-      timings[s.id] = { t: text.starts, v: vocab.starts };
+      // h / hv: short content hashes. The app adds them to the MP3 URLs, so browsers can cache the audio
+      // for a long time and still pick up a re-generated file.
+      const hash = (buf) => crypto.createHash('sha1').update(buf).digest('hex').slice(0, 8);
+      timings[s.id] = { t: text.starts, v: vocab.starts, h: hash(text.buffer), hv: hash(vocab.buffer) };
       saveTimings(); // after every session, so finished ones are usable in the app right away
       total += text.buffer.length + vocab.buffer.length;
       console.log(` ${text.starts.at(-1).toFixed(0)} s, ${((text.buffer.length + vocab.buffer.length) / 1024).toFixed(0)} KB`);
